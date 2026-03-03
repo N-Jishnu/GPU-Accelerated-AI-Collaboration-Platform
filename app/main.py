@@ -9,7 +9,6 @@ import json
 import re
 import shutil
 import socket
-import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -65,6 +64,10 @@ DEFAULT_CODE = "\n".join(
         "    main()",
     ]
 )
+
+app = FastAPI(title="Slingshot Prototype API", version="0.1.0")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.mount("/assets", StaticFiles(directory=str(ASSET_ROOT)), name="assets")
 
 
 class ProjectCreateRequest(BaseModel):
@@ -186,10 +189,6 @@ class WorkspaceFileRenameRequest(BaseModel):
 class WorkspaceActiveFileRequest(BaseModel):
     path: str = Field(min_length=1, max_length=260)
 
-
-app = FastAPI(title="Slingshot Prototype API", version="0.1.0")
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-app.mount("/assets", StaticFiles(directory=str(ASSET_ROOT)), name="assets")
 
 projects: dict[str, dict[str, Any]] = {}
 jobs: dict[str, dict[str, Any]] = {}
@@ -1718,7 +1717,8 @@ def execute_code(req: ExecutionRequest) -> ExecutionResponse:
             stderr = (result.stderr or "").rstrip()
             exit_code = result.returncode
         except subprocess.TimeoutExpired as te:
-            stdout = te.stdout or ''
+            raw_stdout = te.stdout or ''
+            stdout = raw_stdout.decode('utf-8', errors='ignore') if isinstance(raw_stdout, bytes) else str(raw_stdout)
             stderr = f'Timeout after {req.timeout}s'
             exit_code = -1
         except Exception as ex:

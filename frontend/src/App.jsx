@@ -51,6 +51,17 @@ function normalizeWorkspacePath(path) {
   return parts.join("/");
 }
 
+function encodeWorkspacePath(path) {
+  const normalized = normalizeWorkspacePath(path);
+  if (!normalized) {
+    return "";
+  }
+  return normalized
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
 function extensionToLanguage(path) {
   const lower = String(path || "").toLowerCase();
   if (lower.endsWith(".py")) return "python";
@@ -265,7 +276,15 @@ export default function App() {
   const [runActionBusy, setRunActionBusy] = useState("");
   const [launchingKind, setLaunchingKind] = useState("");
   const [modelCapabilities, setModelCapabilities] = useState(null);
-  const [execOutput, setExecOutput] = useState({ run_id: '', stdout: '', stderr: '', exit_code: null, time_ms: 0, status: 'idle' });
+  const [workspaceTree, setWorkspaceTree] = useState(null);
+  const [execOutput, setExecOutput] = useState({
+    run_id: "",
+    stdout: "",
+    stderr: "",
+    exit_code: null,
+    time_ms: 0,
+    status: "idle",
+  });
 
   const wsRef = useRef(null);
   const editDebounceRef = useRef(null);
@@ -368,6 +387,58 @@ export default function App() {
       }
     },
     [applyWorkspaceSnapshot, setJobMessage]
+  );
+
+  const refreshWorkspaceTree = useCallback(
+    async (pid) => {
+      if (!pid) {
+        return;
+      }
+
+      try {
+        const payload = await api(`/api/projects/${pid}/workspace/tree`);
+        setWorkspaceTree(payload);
+      } catch (error) {
+        setJobMessage(`Could not load workspace tree: ${error.message}`, true);
+      }
+    },
+    [setJobMessage]
+  );
+
+  const loadWorkspaceFile = useCallback(
+    async (pid, path) => {
+      const encoded = encodeWorkspacePath(path);
+      if (!pid || !encoded) {
+        return;
+      }
+
+      try {
+        const payload = await api(`/api/projects/${pid}/workspace/files/${encoded}`);
+        const filePath = normalizeWorkspacePath(payload.path || path);
+        if (!filePath) {
+          return;
+        }
+
+        setWorkspace((previous) => {
+          const base = normalizeWorkspace(previous);
+          const files = { ...base.files };
+          files[filePath] = {
+            content: String(payload.content || ""),
+            updated_at: String(payload.updated_at || new Date().toISOString()),
+            language: String(payload.language || extensionToLanguage(filePath)),
+          };
+          return {
+            ...base,
+            files,
+            active_file: filePath,
+            updated_at: new Date().toISOString(),
+          };
+        });
+      } catch (error) {
+        setJobMessage(`Could not load file content: ${error.message}`, true);
+      }
+    },
+    [setJobMessage]
   );
 
   const expandFoldersForPath = useCallback((filePath) => {
@@ -621,6 +692,7 @@ export default function App() {
       setProjectId(resolvedProjectId);
       activeProjectRef.current = resolvedProjectId;
       await refreshWorkspace(resolvedProjectId);
+      await refreshWorkspaceTree(resolvedProjectId);
       await refreshModelCapabilities();
       await refreshAssets(resolvedProjectId);
       await refreshJobs(resolvedProjectId);
@@ -649,6 +721,7 @@ export default function App() {
     refreshJobs,
     refreshModelCapabilities,
     refreshWorkspace,
+    refreshWorkspaceTree,
     setJobMessage,
     stopJobPolling,
   ]);
@@ -694,6 +767,7 @@ export default function App() {
 
         if (payload.type === "workspace_state") {
           applyWorkspaceSnapshot(payload.workspace || null);
+          refreshWorkspaceTree(projectId).catch(() => {});
           return;
         }
 
@@ -705,6 +779,7 @@ export default function App() {
           payload.type === "active_file"
         ) {
           applyWorkspaceEvent(payload);
+          refreshWorkspaceTree(projectId).catch(() => {});
           if (payload.editor && payload.editor !== clientId) {
             setJobMessage(`Live workspace update from ${payload.editor}`);
           }
@@ -778,6 +853,7 @@ export default function App() {
     clientId,
     processIncomingJob,
     projectId,
+    refreshWorkspaceTree,
     setJobMessage,
     startJobPolling,
   ]);
@@ -792,7 +868,7 @@ export default function App() {
   }, []);
 
   const selectFile = useCallback(
-    (path) => {
+    async (path) => {
       const normalized = normalizeWorkspacePath(path);
       if (!normalized) {
         return;
@@ -811,9 +887,20 @@ export default function App() {
       });
 
       expandFoldersForPath(normalized);
-      sendWorkspaceMessage({ type: "set_active_file", path: normalized });
+      try {
+        if (projectId) {
+          await api(`/api/projects/${projectId}/workspace/active-file`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: normalized }),
+          });
+          await loadWorkspaceFile(projectId, normalized);
+        }
+      } catch (error) {
+        setJobMessage(`Could not activate file: ${error.message}`, true);
+      }
     },
-    [expandFoldersForPath, sendWorkspaceMessage]
+    [expandFoldersForPath, loadWorkspaceFile, projectId, setJobMessage]
   );
 
   const onCodeChange = useCallback(
@@ -862,7 +949,7 @@ export default function App() {
     [sendWorkspaceMessage]
   );
 
-  const createFile = useCallback(() => {
+  const createFile = useCallback(async () => {
     const value = window.prompt("New file path (example: src/utils/helpers.py)", "src/new_file.py");
     if (!value) {
       return;
@@ -879,28 +966,23 @@ export default function App() {
       return;
     }
 
-    const starter = extensionToLanguage(normalized) === "python" ? "" : "";
-    setWorkspace((previous) => {
-      const base = normalizeWorkspace(previous);
-      const files = { ...base.files };
-      files[normalized] = {
-        content: starter,
-        updated_at: new Date().toISOString(),
-        language: extensionToLanguage(normalized),
-      };
-      return {
-        ...base,
-        files,
-        active_file: normalized,
-        updated_at: new Date().toISOString(),
-      };
-    });
+    const starter = "";
+    try {
+      const payload = await api(`/api/projects/${projectId}/workspace/files`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: normalized, content: starter }),
+      });
+      applyWorkspaceSnapshot(payload);
+      expandFoldersForPath(normalized);
+      await refreshWorkspaceTree(projectId);
+      await loadWorkspaceFile(projectId, normalized);
+    } catch (error) {
+      setJobMessage(`Could not create file: ${error.message}`, true);
+    }
+  }, [applyWorkspaceSnapshot, expandFoldersForPath, loadWorkspaceFile, projectId, refreshWorkspaceTree, setJobMessage]);
 
-    expandFoldersForPath(normalized);
-    sendWorkspaceMessage({ type: "file_create", path: normalized, content: starter });
-  }, [expandFoldersForPath, sendWorkspaceMessage, setJobMessage]);
-
-  const renameActiveFile = useCallback(() => {
+  const renameActiveFile = useCallback(async () => {
     const activeFile = normalizeWorkspacePath(workspaceRef.current?.active_file || "");
     if (!activeFile) {
       return;
@@ -923,32 +1005,22 @@ export default function App() {
       return;
     }
 
-    setWorkspace((previous) => {
-      const base = normalizeWorkspace(previous);
-      const files = { ...base.files };
-      const entry = files[activeFile];
-      if (!entry) {
-        return base;
-      }
-      files[nextPath] = {
-        ...entry,
-        language: extensionToLanguage(nextPath),
-        updated_at: new Date().toISOString(),
-      };
-      delete files[activeFile];
-      return {
-        ...base,
-        files,
-        active_file: nextPath,
-        updated_at: new Date().toISOString(),
-      };
-    });
+    try {
+      const payload = await api(`/api/projects/${projectId}/workspace/files/move`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ old_path: activeFile, new_path: nextPath }),
+      });
+      applyWorkspaceSnapshot(payload);
+      expandFoldersForPath(nextPath);
+      await refreshWorkspaceTree(projectId);
+      await loadWorkspaceFile(projectId, nextPath);
+    } catch (error) {
+      setJobMessage(`Could not rename file: ${error.message}`, true);
+    }
+  }, [applyWorkspaceSnapshot, expandFoldersForPath, loadWorkspaceFile, projectId, refreshWorkspaceTree, setJobMessage]);
 
-    expandFoldersForPath(nextPath);
-    sendWorkspaceMessage({ type: "file_rename", old_path: activeFile, new_path: nextPath });
-  }, [expandFoldersForPath, sendWorkspaceMessage, setJobMessage]);
-
-  const deleteActiveFile = useCallback(() => {
+  const deleteActiveFile = useCallback(async () => {
     const activeFile = normalizeWorkspacePath(workspaceRef.current?.active_file || "");
     if (!activeFile) {
       return;
@@ -959,33 +1031,139 @@ export default function App() {
       return;
     }
 
-    setWorkspace((previous) => {
-      const base = normalizeWorkspace(previous);
-      const files = { ...base.files };
-      delete files[activeFile];
-
-      if (!Object.keys(files).length) {
-        files[DEFAULT_ACTIVE_FILE] = {
-          content: DEFAULT_CODE,
-          updated_at: new Date().toISOString(),
-          language: extensionToLanguage(DEFAULT_ACTIVE_FILE),
-        };
+    try {
+      const encoded = encodeWorkspacePath(activeFile);
+      const payload = await api(`/api/projects/${projectId}/workspace/files/${encoded}`, {
+        method: "DELETE",
+      });
+      applyWorkspaceSnapshot(payload);
+      await refreshWorkspaceTree(projectId);
+      const nextActive = normalizeWorkspacePath(payload?.active_file || "");
+      if (nextActive) {
+        await loadWorkspaceFile(projectId, nextActive);
       }
+    } catch (error) {
+      setJobMessage(`Could not delete file: ${error.message}`, true);
+    }
+  }, [applyWorkspaceSnapshot, loadWorkspaceFile, projectId, refreshWorkspaceTree, setJobMessage]);
 
-      const nextActive = files[activeFile]
-        ? activeFile
-        : Object.keys(files).sort()[0] || DEFAULT_ACTIVE_FILE;
+  const createFolder = useCallback(async () => {
+    if (!projectId) {
+      return;
+    }
 
-      return {
-        ...base,
-        files,
-        active_file: nextActive,
-        updated_at: new Date().toISOString(),
-      };
-    });
+    const value = window.prompt("New folder path (example: src/utils)", "src/new_folder");
+    if (!value) {
+      return;
+    }
 
-    sendWorkspaceMessage({ type: "file_delete", path: activeFile });
-  }, [sendWorkspaceMessage]);
+    const normalized = normalizeWorkspacePath(value);
+    if (!normalized) {
+      setJobMessage("Invalid folder path.", true);
+      return;
+    }
+
+    try {
+      await api(`/api/projects/${projectId}/workspace/folders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: normalized }),
+      });
+      setJobMessage(`Folder created: ${normalized}`);
+      setExpandedFolders((previous) => {
+        const next = new Set(previous);
+        const segments = normalized.split("/");
+        let prefix = "";
+        for (const segment of segments) {
+          prefix = prefix ? `${prefix}/${segment}` : segment;
+          next.add(prefix);
+        }
+        return next;
+      });
+      await refreshWorkspaceTree(projectId);
+      await refreshWorkspace(projectId);
+    } catch (error) {
+      setJobMessage(`Could not create folder: ${error.message}`, true);
+    }
+  }, [projectId, refreshWorkspace, refreshWorkspaceTree, setJobMessage]);
+
+  const migrateLegacyProjects = useCallback(async () => {
+    try {
+      const result = await api("/api/migrate-workspace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const count = Number(result?.migrated || 0);
+      setJobMessage(`Migration complete: ${count} project(s) migrated.`);
+      if (projectId) {
+        await refreshWorkspace(projectId);
+        await refreshWorkspaceTree(projectId);
+      }
+    } catch (error) {
+      setJobMessage(`Migration failed: ${error.message}`, true);
+    }
+  }, [projectId, refreshWorkspace, refreshWorkspaceTree, setJobMessage]);
+
+  const runCode = useCallback(async () => {
+    const activePath = normalizeWorkspacePath(workspaceRef.current?.active_file || "");
+    if (!activePath) {
+      setJobMessage("No active file selected for execution.", true);
+      return;
+    }
+
+    const activeEntry = workspaceRef.current?.files?.[activePath];
+    const code = String(activeEntry?.content || "");
+    const language = extensionToLanguage(activePath);
+
+    if (language !== "python") {
+      setExecOutput({
+        run_id: "",
+        stdout: "",
+        stderr: `Execution currently supports Python only. Active file language: ${language}`,
+        exit_code: 1,
+        time_ms: 0,
+        status: "failed",
+      });
+      return;
+    }
+
+    setExecOutput((previous) => ({
+      ...previous,
+      run_id: "",
+      stdout: "",
+      stderr: "",
+      exit_code: null,
+      time_ms: 0,
+      status: "running",
+    }));
+
+    try {
+      const result = await api("/api/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: "python", code, timeout: 12 }),
+      });
+      setExecOutput({
+        run_id: String(result?.run_id || ""),
+        stdout: String(result?.stdout || ""),
+        stderr: String(result?.stderr || ""),
+        exit_code: Number.isFinite(result?.exit_code) ? result.exit_code : null,
+        time_ms: Number.isFinite(result?.time_ms) ? result.time_ms : 0,
+        status: String(result?.status || "completed"),
+      });
+    } catch (error) {
+      setExecOutput({
+        run_id: "",
+        stdout: "",
+        stderr: String(error?.message || error),
+        exit_code: 1,
+        time_ms: 0,
+        status: "failed",
+      });
+      setJobMessage(`Execution failed: ${error.message}`, true);
+    }
+  }, [setJobMessage]);
 
   const launchJob = useCallback(async (kind) => {
     if (!projectId) {
@@ -1204,7 +1382,12 @@ export default function App() {
     language: extensionToLanguage(activeFilePath),
     updated_at: "",
   };
-  const explorerTree = useMemo(() => buildExplorerTree(workspaceFiles), [workspaceFiles]);
+  const explorerTree = useMemo(() => {
+    if (workspaceTree && workspaceTree.root && typeof workspaceTree.root === "object") {
+      return workspaceTree.root;
+    }
+    return buildExplorerTree(workspaceFiles);
+  }, [workspaceFiles, workspaceTree]);
 
   const toggleFolder = useCallback((folderPath) => {
     if (!folderPath) {
@@ -1247,6 +1430,9 @@ export default function App() {
         }
 
         const isActive = node.path === activeFilePath;
+        if (node.name === ".keep") {
+          return null;
+        }
         return (
           <button
             key={node.path}
@@ -1304,6 +1490,9 @@ export default function App() {
           <p className="subtitle">
             Live collaborative coding workspace with local GPU pipeline and shared run outputs.
           </p>
+          <p className="hint stack-summary">
+            Model stack: {configuredSummary || "script/image/audio providers using safe local defaults"}
+          </p>
           <div className="meta-row">
             <span className="badge">Project: {projectId || "initializing..."}</span>
             <span className="badge">Client: {clientId}</span>
@@ -1321,6 +1510,9 @@ export default function App() {
             >
               Show QR code
             </button>
+            <button type="button" className="secondary-btn" onClick={migrateLegacyProjects}>
+              Migrate legacy projects
+            </button>
           </div>
           <p className="hint share-url">Share URL: {shareUrl || "preparing..."}</p>
         </section>
@@ -1335,11 +1527,17 @@ export default function App() {
             <button type="button" onClick={createFile} disabled={!projectId}>
               New file
             </button>
+            <button type="button" className="secondary-btn" onClick={createFolder} disabled={!projectId}>
+              New folder
+            </button>
             <button type="button" className="secondary-btn" onClick={renameActiveFile} disabled={!projectId}>
               Rename file
             </button>
             <button type="button" className="danger-btn" onClick={deleteActiveFile} disabled={!projectId}>
               Delete file
+            </button>
+            <button type="button" onClick={runCode} disabled={!projectId || execOutput.status === "running"}>
+              {execOutput.status === "running" ? "Running..." : "Run active file"}
             </button>
           </div>
 
@@ -1457,6 +1655,29 @@ export default function App() {
             </div>
           ) : null}
           <pre id="jobLogs">{jobLogs}</pre>
+        </section>
+
+        <section className="panel execution-panel">
+          <div className="panel-head">
+            <h2>Execution Output</h2>
+            <span className="asset-meta">Separate code execution pipeline</span>
+          </div>
+          <div className={`job-pill ${execOutput.status === "failed" ? "job-pill-error" : ""}`}>
+            Status: {String(execOutput.status || "idle").toUpperCase()}
+            {execOutput.exit_code !== null ? ` | Exit: ${execOutput.exit_code}` : ""}
+            {execOutput.time_ms ? ` | ${execOutput.time_ms} ms` : ""}
+            {execOutput.run_id ? ` | Run ID: ${execOutput.run_id}` : ""}
+          </div>
+          <div className="execution-streams">
+            <div>
+              <p className="execution-label">stdout</p>
+              <pre className="execution-output">{execOutput.stdout || "(empty)"}</pre>
+            </div>
+            <div>
+              <p className="execution-label">stderr</p>
+              <pre className="execution-output execution-error">{execOutput.stderr || "(empty)"}</pre>
+            </div>
+          </div>
         </section>
 
         <section className="panel assets-panel">

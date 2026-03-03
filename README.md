@@ -5,6 +5,9 @@ This folder contains the first executable prototype for the **Distributed GPU Ac
 Current build focuses on a reliable MVP flow:
 
 - Real-time collaborative coding workspace with VS Code-style explorer
+- Nested folder support with workspace tree API + folder creation
+- Legacy script-to-workspace migration endpoint and UI action
+- Separate code execution pipeline panel (stdout/stderr/exit/time)
 - One-click pipeline job execution
 - Storyboard image generation (SVG scenes)
 - Narration audio generation (WAV)
@@ -36,7 +39,7 @@ cd frontend
 npm install
 npm run build
 cd ..
-uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
 Open `http://localhost:8000`.
@@ -44,7 +47,7 @@ Open `http://localhost:8000`.
 If you run from the parent folder (`AMD`), use:
 
 ```bash
-uvicorn app.main:app --reload --port 8000 --app-dir ./prototype
+python -m uvicorn app.main:app --reload --port 8000 --app-dir ./prototype
 ```
 
 ## Optional real model providers
@@ -113,12 +116,22 @@ Open `http://localhost:5173` while developing.
 
 1. Open the app in two browser tabs.
 2. Share the same project link (`?project=<id>`) between tabs.
-3. Create/edit code files in one tab and watch live sync in the other tab.
-4. Click **Run pipeline** or **Run fine-tune**.
-5. Track live job logs, metrics, and generated assets on both devices.
-6. For fine-tune jobs, review `checkpoint_epoch_*.json` and `finetune_report.json` assets.
-7. In **Generated Assets**, each run appears as its own folder with asset count and ZIP export.
-8. Use **Delete run** or **Cleanup old runs** to manage storage.
+3. Create/edit files and folders in one tab and watch live sync in the other tab.
+4. Use **Run active file** in Collaborative Coding to execute Python code and inspect stdout/stderr in **Execution Output**.
+5. Click **Run pipeline** or **Run fine-tune**.
+6. Track live job logs, metrics, and generated assets on both devices.
+7. For fine-tune jobs, review `checkpoint_epoch_*.json` and `finetune_report.json` assets.
+8. In **Generated Assets**, each run appears as its own folder with asset count and ZIP export.
+9. Use **Delete run** or **Cleanup old runs** to manage storage.
+
+## Phase 1 APIs added
+
+- `GET /api/projects/{project_id}/workspace/tree`
+- `GET /api/projects/{project_id}/workspace/files/{path}`
+- `POST /api/projects/{project_id}/workspace/folders`
+- `PATCH /api/projects/{project_id}/workspace/files/move`
+- `POST /api/migrate-workspace`
+- `POST /api/execute`
 
 ## Notes
 
