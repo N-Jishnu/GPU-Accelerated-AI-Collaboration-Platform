@@ -1,7 +1,5 @@
 # Slingshot Prototype (Execution Build)
 
-This folder contains the first executable prototype for the **Distributed GPU Accelerated Multimodal AI Collaboration Studio** from your PPT.
-
 Current build focuses on a reliable MVP flow:
 
 - Real-time collaborative coding workspace with VS Code-style explorer
@@ -9,9 +7,6 @@ Current build focuses on a reliable MVP flow:
 - Legacy script-to-workspace migration endpoint and UI action
 - Separate code execution pipeline panel (stdout/stderr/exit/time)
 - One-click pipeline job execution
-- Storyboard image generation (SVG scenes)
-- Narration audio generation (WAV)
-- Optional MP4 rendering when `ffmpeg` is installed
 - Job progress, logs, and generated asset browser
 - Live job status sync to all connected collaborators
 - Real local fine-tune worker with epoch checkpoints and loss metrics
@@ -134,7 +129,5 @@ Open `http://localhost:5173` while developing.
 - `POST /api/execute`
 
 ## Notes
-
-- If `ffmpeg` is missing, the pipeline still completes with storyboard assets and a render report.
 - All generated files are stored in `runtime/assets/<project_id>/...`.
 - Projects and jobs are persisted to `runtime/state.json` so restarts keep history.
